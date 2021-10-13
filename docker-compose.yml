@@ -1,0 +1,191 @@
+##
+## Definition of the services that constitute the scenario for integration
+## Keycloak and Liferay via OpenID Connect (OIDC)
+##
+version: '3.7'
+
+##
+## Definition of the volumes
+##
+volumes:
+  postgres_data_keycloak:
+    driver: local
+  postgres_data_liferay:
+    driver: local
+
+##
+## Definition of the services
+##  1. PostgreSQL 9.4  per Keycloak
+##  2. PostgreSQL 12.8 per Liferay
+##  3. Traefik Load Balancer 2.5.3
+##  4. Keycloak 15.0.2
+##  5. Fake SMTP Server
+##  6. Server LDAP (OpenLDAP 1.5.0)
+##  7. PHP LDAP Admin
+##  8. Liferay CE 7.3
+##
+services:
+  postgres-keycloak:
+    image: 'postgres:9.4-alpine'
+    hostname: postgres-keycloak
+    volumes:
+      - postgres_data_keycloak:/var/lib/postgresql/data
+    command: 
+      -p 6432
+    restart: 'always'
+    environment:
+      POSTGRES_USER: ${POSTGRES_KEYCLOAK_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_KEYCLOAK_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_KEYCLOAK_DB}
+      POSTGRES_HOST: ${POSTGRES_KEYCLOAK_HOST}
+  
+  postgres-liferay:
+    image: 'postgres:12.8-alpine'
+    hostname: postgres-liferay
+    volumes:
+      - postgres_data_liferay:/var/lib/postgresql/data
+    restart: 'always'
+    environment:
+      POSTGRES_USER: ${POSTGRES_LIFERAY_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_LIFERAY_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_LIFERAY_DB}
+      POSTGRES_HOST: ${POSTGRES_LIFERAY_HOST}
+
+  traefik:
+    image: traefik:2.5.3
+    hostname: iam.smc.lab.local
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./volumes/traefik/configuration/:/configuration/
+    command:
+      - --log.level=INFO
+      - --entrypoints.websecure.address=:443
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.directory=/configuration/
+      - --providers.file.watch=true
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --serversTransport.insecureSkipVerify=true
+    ports:
+      - 443:443
+      - 9080:8080
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:15.0.2
+    volumes:
+      - ./volumes/keycloack/certs:/etc/x509/https
+    environment:
+      DB_VENDOR: ${DB_VENDOR}
+      DB_ADDR: ${DB_ADDR}
+      DB_PORT: ${DB_PORT}
+      DB_DATABASE: ${DB_DATABASE}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      KEYCLOAK_USER: ${KEYCLOAK_USER}
+      KEYCLOAK_PASSWORD: ${KEYCLOAK_PASSWORD}
+      KEYCLOAK_LOGLEVEL: ${KEYCLOAK_LOGLEVEL}
+      KEYCLOAK_STATISTICS: ${KEYCLOAK_STATISTICS}
+      PROXY_ADDRESS_FORWARDING: ${PROXY_ADDRESS_FORWARDING}
+      JGROUPS_DISCOVERY_PROTOCOL: ${JGROUPS_DISCOVERY_PROTOCOL}
+      JGROUPS_DISCOVERY_PROPERTIES: ${JGROUPS_DISCOVERY_PROPERTIES}
+    depends_on:
+      - postgres-keycloak
+    labels:
+      - traefik.enable=true
+      - traefik.port=8080
+      - traefik.http.routers.keycloak.rule=Host(`iam.smc.lab.local`)
+      - traefik.http.routers.keycloak.entrypoints=websecure
+      - traefik.http.routers.keycloak.service=keycloak
+      - traefik.http.services.keycloak.loadbalancer.server.port=8443
+      - traefik.http.services.keycloak.loadbalancer.server.scheme=https
+      - traefik.http.services.keycloak.loadbalancer.healthCheck.path=/auth
+      - traefik.http.services.keycloak.loadbalancer.healthCheck.interval=20s
+      - traefik.http.services.keycloak.loadbalancer.healthCheck.timeout=2s
+      - traefik.http.services.keycloak.loadbalancer.healthCheck.scheme=https
+      - traefik.http.services.keycloak.loadbalancer.healthCheck.port=8443
+      - traefik.http.routers.keycloak.tls=true
+      - traefik.http.routers.keycloak.tls.domains[0].main=smc.lab.local
+      - traefik.http.routers.keycloak.tls.domains[0].sans=*.smc.lab.local
+
+  fake-smtp-server:
+    hostname: smtp.smc.lab.local
+    image:  reachfive/fake-smtp-server:latest
+    ports:
+      - 1080:1080
+
+  openldap:
+    image: osixia/openldap:1.5.0
+    environment:
+      LDAP_LOG_LEVEL: "256"
+      LDAP_ORGANISATION: "SMC Treviso S.r.l."
+      LDAP_DOMAIN: "smc.local"
+      LDAP_BASE_DN: "dc=smc,dc=local"
+      LDAP_ADMIN_PASSWORD: "admin"
+      LDAP_CONFIG_PASSWORD: "config"
+      LDAP_READONLY_USER: "true"
+      LDAP_READONLY_USER_USERNAME: "readonly"
+      LDAP_READONLY_USER_PASSWORD: "readonly"
+      LDAP_RFC2307BIS_SCHEMA: "false"
+      LDAP_BACKEND: "mdb"
+      LDAP_TLS: "true"
+      LDAP_TLS_CRT_FILENAME: "openldap.smc.local.crt"
+      LDAP_TLS_KEY_FILENAME: "openldap.smc.local.key"
+      LDAP_TLS_CA_CRT_FILENAME: "openldap.smc.local.ca.crt"
+      LDAP_TLS_DH_PARAM_FILENAME: "dhparam.pem"
+      LDAP_TLS_ENFORCE: "false"
+      LDAP_TLS_CIPHER_SUITE: "SECURE256:+SECURE128:-VERS-TLS-ALL:+VERS-TLS1.2:-RSA:-DHE-DSS:-CAMELLIA-128-CBC:-CAMELLIA-256-CBC"
+      LDAP_REPLICATION: "false"
+      KEEP_EXISTING_CONFIG: "false"
+      LDAP_REMOVE_CONFIG_AFTER_SETUP: "true"
+      LDAP_SSL_HELPER_PREFIX: "ldap"
+    tty: true
+    stdin_open: true
+    command: [--copy-service,  --loglevel, debug]
+    volumes:
+      - /var/lib/ldap
+      - /etc/ldap/slapd.d
+      - /container/service/slapd/assets/certs/
+      - ./config/ldap:/container/service/slapd/assets/config/bootstrap/ldif/custom
+    ports:
+      - "389:389"
+      - "636:636"
+    hostname: openldap
+  phpldapadmin:
+    image: osixia/phpldapadmin:stable
+    environment:
+      PHPLDAPADMIN_LDAP_HOSTS: "openldap"
+      PHPLDAPADMIN_HTTPS: "false"
+    ports:
+      - "7080:80"
+    depends_on:
+      - openldap  
+
+  liferay:
+    image: liferay/portal:7.3.5-ga6
+    hostname: portal.smc.lab.local
+    ports:
+      - '6080:8080'
+      - '22322:11311'
+    volumes:
+      - ./config/liferay/configs:/etc/liferay/mount/files
+      - ./config/liferay/scripts:/etc/liferay/mount/scripts
+      - ./config/liferay/deploy:/etc/liferay/mount/deploy
+    depends_on:
+      - postgres-liferay
+    labels:
+      - traefik.enable=true
+      - traefik.port=8080
+      - traefik.http.routers.liferay.rule=Host(`portal.smc.lab.local`)
+      - traefik.http.routers.liferay.entrypoints=websecure
+      - traefik.http.routers.liferay.service=liferay
+      - traefik.http.services.liferay.loadbalancer.server.port=8080
+      - traefik.http.services.liferay.loadbalancer.server.scheme=http
+      - traefik.http.services.liferay.loadbalancer.healthCheck.path=/web/guest
+      - traefik.http.services.liferay.loadbalancer.healthCheck.interval=60s
+      - traefik.http.services.liferay.loadbalancer.healthCheck.timeout=40s
+      - traefik.http.services.liferay.loadbalancer.healthCheck.scheme=http
+      - traefik.http.services.liferay.loadbalancer.healthCheck.port=8080
+      - traefik.http.routers.liferay.tls=true
+      - traefik.http.routers.liferay.tls.domains[0].main=smc.lab.local
+      - traefik.http.routers.liferay.tls.domains[0].sans=*.smc.lab.local
